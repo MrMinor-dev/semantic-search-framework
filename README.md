@@ -1,341 +1,161 @@
 # Semantic Search Framework
-## 4-Layer Architecture for AI Context Management
 
-**Author:** Jordan Minor  
-**Technologies:** Python, ChromaDB, sentence-transformers, Model Context Protocol (MCP)  
-**Status:** Production (MRMINOR LLC)  
-**Impact:** 70-90% reduction in context loading overhead
+**Production retrieval infrastructure: 17,428 embedded chunks with sub-second search and incremental indexing**
+
+A complete pipeline for parsing, chunking, embedding, and retrieving unstructured text at scale — built to make 350+ AI conversations and 500+ documents searchable in under a second. Migrated from local ChromaDB to cloud Supabase pgvector. Hash-based incremental updates run in <10 seconds vs. 5+ minutes for full rebuilds.
 
 ---
 
-## Executive Summary
+## The Problem
 
-Built a semantic search system that transforms how AI assistants access and utilize business documentation, reducing token consumption by 70-90% while improving information retrieval accuracy.
+When an AI agent operates across hundreds of sessions, it generates enormous amounts of institutional knowledge — conversations, decisions, debugging stories, architectural rationale. But without retrieval infrastructure, that knowledge is inaccessible:
 
-**The Problem:**
-- AI assistants waste 40-50k tokens loading unnecessary context
-- Traditional file browsing requires loading entire documents to find relevant sections
-- No intelligent way to locate information across 77+ business documents
-- Context limits frequently exceeded, causing incomplete work sessions
-
-**The Solution:**
-- 4-layer architecture: Raw Markdown → Processed Chunks → Vector Embeddings → Semantic Search
-- ChromaDB vector database with 7,396+ indexed chunks
-- Local embeddings (zero API costs, sub-second search)
-- Incremental update capability (10 seconds vs 60 seconds full reindex)
-
-**The Results (Production Data from MRMINOR LLC):**
-- **70-90% token efficiency improvement** on context loading tasks
-- **Search queries consume 0 tokens** (MCP architecture)
-- **Sub-second semantic search** across 124 markdown documents
-- **98% session completion rate** (vs 85% pre-implementation)
-- **30+ additional work hours per month** from token savings
+- **Brute force doesn't scale.** Loading "everything that might be relevant" into context burns your token budget before the agent does any work. At 373 conversations and 1.2M words, you can't just dump it all in.
+- **File-level retrieval is too coarse.** Finding the right *document* isn't enough — you need the right *paragraph* from the right document. A 5,000-word conversation might contain exactly 3 sentences that answer your question.
+- **Full rebuilds are unsustainable.** When one document changes, re-embedding 17,000+ chunks wastes 5+ minutes of compute. You need to know what changed and only re-process that.
+- **Local solutions don't compose.** A ChromaDB instance running on one machine can't serve a cloud automation platform. The embedding store needs to be accessible from wherever the agent operates.
 
 ---
 
-## Business Value
+## Architecture
 
-### Operational Efficiency
+```
+┌──────────────────────────────────────────────────────┐
+│              SEMANTIC SEARCH PIPELINE                 │
+├──────────────────────────────────────────────────────┤
+│                                                      │
+│  INGEST                                              │
+│  ┌────────────────────────────────────────────┐      │
+│  │ Source files (Markdown, conversations)      │      │
+│  │         ↓                                  │      │
+│  │ Parse → Normalize → Chunk (~500 tokens)    │      │
+│  │         ↓                                  │      │
+│  │ Hash check: content changed?               │      │
+│  │   No  → Skip (already indexed)             │      │
+│  │   Yes → Delete old chunks → Re-embed       │      │
+│  └────────────────────────────────────────────┘      │
+│                                                      │
+│  EMBED                                               │
+│  ┌────────────────────────────────────────────┐      │
+│  │ sentence-transformers (all-MiniLM-L6-v2)   │      │
+│  │ 384-dimensional vectors                    │      │
+│  │ Batched processing with error handling     │      │
+│  └────────────────────────────────────────────┘      │
+│                    ↓                                 │
+│  STORE                                               │
+│  ┌────────────────────────────────────────────┐      │
+│  │ Supabase PostgreSQL + pgvector             │      │
+│  │ HNSW index (cosine similarity)             │      │
+│  │ UNIQUE(file_path, chunk_index) constraint  │      │
+│  │ content_hash for smart reindexing          │      │
+│  └────────────────────────────────────────────┘      │
+│                    ↓                                 │
+│  RETRIEVE                                            │
+│  ┌────────────────────────────────────────────┐      │
+│  │ n8n webhook → HuggingFace embed query      │      │
+│  │         ↓                                  │      │
+│  │ pgvector similarity search                 │      │
+│  │         ↓                                  │      │
+│  │ Ranked results with metadata               │      │
+│  └────────────────────────────────────────────┘      │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+```
 
-**Before Implementation:**
-- Manual document browsing: 5-10 minutes per search
-- Context loading: 40-50k tokens per task
-- Blind file loading: Load entire docs "just in case"
-- Session failures: 15% of sessions hit token limits
-- Average context usage: 45k tokens per session
+### Ingest Layer
 
-**After Implementation:**
-- Semantic search: <5 seconds per query
-- Context loading: 5-15k tokens per task (67% reduction)
-- Targeted retrieval: Load only relevant sections
-- Session failures: 2% (98% completion rate)
-- Average context usage: 15k tokens per session
+Source material comes in two forms: structured Markdown documents (architecture docs, schemas, plans) and unstructured AI conversations (373 conversations, 1.2M words, 224MB). The parser normalizes both into consistent chunks of ~500 tokens with overlap to preserve context at boundaries.
 
-**Monthly Impact:**
-- Token savings: ~1.14 million tokens/month (30 sessions × 38k saved)
-- Time savings: 30+ additional work hours
-- Cost avoidance: Zero API costs (local embeddings)
-- Reliability: Consistent sub-second performance
+Before embedding, each file's content is hashed (MD5). The hash is compared against what's stored in the database. If unchanged — skip entirely. If changed — delete old chunks and re-embed. This single optimization reduced routine index updates from 5+ minutes to under 10 seconds.
 
-### Technical Innovation
+### Embedding Layer
 
-**Novel Chunking Strategy:**
-- Section-based chunking (preserves document structure)
-- Configurable overlap between chunks (maintains context continuity)
-- Metadata-rich results (file path + section breadcrumbs)
+Embeddings are generated using `sentence-transformers/all-MiniLM-L6-v2` via HuggingFace API — 384-dimensional vectors optimized for semantic similarity. Processing is batched with error handling for API rate limits and transient failures.
 
-**Intelligent Model Selection:**
-- all-MiniLM-L6-v2 embedding model (fast, 80MB, high quality)
-- ChromaDB with cosine similarity (optimized for semantic search)
-- Local inference (no API latency or costs)
+### Storage Layer
 
-**Incremental Updates:**
-- Full reindex: 7,396 chunks in 60 seconds
-- Incremental update: 1-10 files in <10 seconds
-- Automatic batch size management (ChromaDB optimization)
-- Zero-downtime updates (persistent storage)
+Migrated from local ChromaDB to Supabase PostgreSQL with pgvector extension. The migration solved three problems at once: cloud accessibility (any service can query it), persistence (no local process to keep running), and composability (same database that hosts the application schema).
 
----
+Key schema decisions:
+- **HNSW index** on the embedding column for fast approximate nearest-neighbor search
+- **UNIQUE constraint** on `(file_path, chunk_index)` to prevent duplicate chunks
+- **content_hash column** enabling the incremental update optimization
+- **JSONB metadata** column for flexible file-level attributes (name, folder, size, date)
 
-## System Architecture
+### Retrieval Layer
 
-### 4-Layer Design
+A cloud webhook receives search queries, embeds the query text using the same model, and runs a cosine similarity search against pgvector. Results return ranked by relevance with source metadata — allowing the consuming agent to cite where information came from.
 
-**Layer 1: Raw Markdown Files**
-- Source of truth (77 documents, 124+ markdown files)
-- Organized folder structure (Strategy, Technical, Data, etc.)
-- Standard markdown formatting with headers
-
-**Layer 2: Processed Chunks**
-- Section-based splitting (preserves logical units)
-- 1,000 character chunks with 200 character overlap
-- Metadata extraction (file path, section headers, hierarchy)
-
-**Layer 3: Vector Embeddings**
-- sentence-transformers (all-MiniLM-L6-v2)
-- 384-dimensional dense vectors
-- Local inference (200ms per chunk)
-- Persistent ChromaDB storage
-
-**Layer 4: Semantic Search Interface**
-- MCP (Model Context Protocol) server
-- Query → vector embedding → cosine similarity
-- Ranked results with similarity scores
-- Returns: file path, section context, content snippet
-
-### Technology Stack
-
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| Embedding Model | all-MiniLM-L6-v2 | Fast, high-quality sentence embeddings |
-| Vector Database | ChromaDB | Efficient similarity search |
-| Server Protocol | MCP (Model Context Protocol) | AI assistant integration |
-| Programming Language | Python 3.12 | Server implementation |
-| Dependencies | sentence-transformers, chromadb | Core functionality |
-
----
-## Key Features
-
-### Semantic Understanding
-- Meaning-based search (not just keyword matching)
-- Understands context and intent
-- Finds relevant information even with different terminology
-- Example: "token efficiency" finds "context management" and "budget allocation"
-
-### Zero-Cost Operations
-- Local embedding model (no API calls)
-- One-time download (80MB model)
-- Persistent vector storage (reuse across sessions)
-- No recurring costs or rate limits
-
-### Performance Optimized
-- Sub-second search queries (<500ms typical)
-- Efficient chunking strategy (maintains context)
-- Batch processing for large updates
-- Minimal memory footprint (~500MB RAM)
-
-### Production Ready
-- Incremental update support (update_files tool)
-- Error handling and recovery
-- Configurable parameters (chunk size, overlap, results)
-- Detailed logging and debugging
+The "search before load" policy: always query the index first, then load full files only when the chunks confirm relevance. This pattern consistently saves 80%+ of the tokens that would be wasted on speculative document loading.
 
 ---
 
-## Production Metrics (MRMINOR LLC)
+## Key Insight
 
-**Current Scale:**
-- 124 markdown files indexed
-- 7,396 searchable chunks
-- 77 business documents (Strategy, Financial, Technical, Legal, etc.)
-- ~500MB total storage (embeddings + database)
+**The migration from local to cloud wasn't a technical upgrade — it was an architectural unlock.**
 
-**Performance Benchmarks:**
-- Search latency: <500ms (95th percentile)
-- Index update time: 10 seconds (1-10 files incremental)
-- Full reindex time: 60 seconds (7,396 chunks)
-- Memory usage: ~500MB RAM steady state
+ChromaDB worked fine as a local embedding store. But it couldn't serve the cloud automation platform (n8n), couldn't be queried from different machines, and required a running Python process. Moving to Supabase pgvector turned the search index from a local tool into a shared service — any workflow, any agent, any interface could query it.
 
-**Token Efficiency (Measured Over 30 Sessions):**
-- Average pre-MCP context loading: 45k tokens/session
-- Average post-MCP context loading: 15k tokens/session
-- Average savings: 30k-40k tokens/session (67-89% reduction)
-- Monthly savings: 1.14 million tokens (30 sessions)
-- Business value: 30+ additional work hours per month
-
-**Reliability:**
-- Search success rate: 100% (no failures)
-- Session completion rate: 98% (vs 85% pre-MCP)
-- Uptime: 100% (local server, no external dependencies)
+The lesson: retrieval infrastructure only compounds when it's accessible from everywhere the system operates. A search index locked to one machine is a local optimization. A search index on the network is a platform capability.
 
 ---
 
-## Use Cases
+## Debugging Journey
 
-### 1. Business Document Management
-**Scenario:** AI COO needs to find information about revenue tracking procedures
+Real problems encountered and solved during development:
 
-**Traditional Approach:**
-1. Browse directory structure
-2. Load multiple candidate files (15k+ tokens each)
-3. Scan content manually
-4. Result: 40-50k tokens consumed, 10+ minutes
+**Python version incompatibility.** Python 3.14 was too new for sentence-transformers dependencies. Downgraded to 3.12. Lesson: bleeding-edge runtimes and ML libraries don't mix.
 
-**Semantic Search Approach:**
-1. Query: "revenue tracking procedures and automation"
-2. Receive ranked results with exact sections
-3. Load only relevant 2-3k tokens
-4. Result: 2-3k tokens consumed, <5 seconds
+**JSON parsing failures from stdout pollution.** The MCP server communicated via JSON over stdout, but logging statements contaminated the stream. Took hours to diagnose because the errors were intermittent — only triggered when certain log paths fired. Fix: strict separation of logging from communication channels.
 
-### 2. Protocol Verification
-**Scenario:** Verify crisis management escalation thresholds before major decision
+**Batching iteration bugs.** The `update_files` function had an off-by-one error in its batch processing loop that silently dropped the last batch when file count wasn't evenly divisible. Only caught by comparing expected vs. actual chunk counts post-index.
 
-**Benefit:**
-- Instant access to critical decision matrices
-- No need to load entire crisis management framework
-- Verify compliance in real-time
-- Zero token cost for search
-
-### 3. Context Recovery
-**Scenario:** New session needs context from previous work
-
-**Traditional:** Load conversation_search (40-50k tokens)  
-**Semantic:** Query specific topics (0 tokens search, 5-10k load)  
-**Savings:** 30-40k tokens (75-80% reduction)
+**Webhook vs. MCP payload differences.** The same search function received differently-structured inputs depending on whether it was called via n8n webhook or MCP. Intermittent failures traced to payload structure assumptions. Fix: defensive type-checking at the input boundary of every utility function.
 
 ---
 
-## Technical Comparison
-
-### vs. Traditional File Systems
-
-| Feature | File System | Semantic Search |
-|---------|------------|----------------|
-| Search Method | Keyword/filename | Meaning-based |
-| Token Cost | Full file load | 0 tokens search |
-| Speed | 5-10 min browsing | <5 sec search |
-| Accuracy | Hit or miss | Ranked relevance |
-| Context | Load full docs | Load sections only |
-| Scalability | Degrades with size | Constant performance |
-
-### vs. Cloud Vector Databases
-
-| Feature | Cloud (Pinecone, etc.) | This Implementation |
-|---------|----------------------|-------------------|
-| API Costs | $70-200/month | $0 (local) |
-| Latency | 100-500ms network | <500ms local |
-| Privacy | Data uploaded | Fully local |
-| Dependencies | Internet required | Offline capable |
-| Rate Limits | API throttling | No limits |
-| Setup | Account + API keys | One-time install |
-
-### vs. Simple Text Search
-
-| Feature | grep/find | Semantic Search |
-|---------|-----------|----------------|
-| Understanding | Exact matches only | Conceptual meaning |
-| Synonyms | Manual variants | Automatic |
-| Context | No ranking | Similarity scored |
-| Use Case | Known exact terms | Exploratory queries |
-
----
-## Implementation Highlights
-
-### Problem-Solving Journey
-
-**Initial Challenge:** AI assistant hitting 190k token limit, causing incomplete sessions
-
-**Investigation:**
-- Analyzed token consumption patterns across 40+ sessions
-- Identified context loading as primary bottleneck (45k tokens average)
-- Discovered 40-50k token waste in conversation_search operations
-- Recognized need for intelligent information retrieval
-
-**Solution Design:**
-- Researched vector database options (Pinecone, Weaviate, ChromaDB)
-- Selected ChromaDB (local, zero cost, fast)
-- Chose sentence-transformers (proven quality, fast inference)
-- Designed 4-layer architecture for maintainability
-
-**Implementation:**
-- Built MCP server integration (200 lines Python)
-- Developed section-based chunking strategy (preserves context)
-- Implemented incremental update system (10-second updates)
-- Fixed ChromaDB batching bug during production testing
-
-**Validation:**
-- Measured 67-89% token efficiency improvement (proven over 30 sessions)
-- Achieved 98% session completion rate (vs 85% baseline)
-- Confirmed sub-second search performance
-- Documented entire journey for replication
-
----
-
-## Skills Demonstrated
-
-### Technical Skills
-- **System Architecture:** Designed scalable 4-layer architecture
-- **Vector Databases:** ChromaDB implementation and optimization
-- **Machine Learning:** Embedding model selection and evaluation
-- **Python Development:** MCP server, async operations, error handling
-- **Performance Optimization:** Reduced latency from 60s to 10s (incremental updates)
-- **Protocol Integration:** MCP (Model Context Protocol) implementation
-
-### Operational Skills
-- **Problem Identification:** Recognized token efficiency as critical bottleneck
-- **Data Analysis:** Measured 30-session baseline to validate improvements
-- **Documentation:** Complete technical specs (README, ARCHITECTURE, IMPLEMENTATION)
-- **Production Operations:** Incremental updates, monitoring, error recovery
-- **Cost Optimization:** Eliminated API costs through local inference
-
-### Business Skills
-- **ROI Quantification:** 30+ work hours per month value creation
-- **Risk Management:** Local storage (privacy), offline capability (reliability)
-- **Strategic Planning:** Designed for scale (handles 10x document growth)
-- **Process Improvement:** 67-89% efficiency gain proven in production
-
----
-
-## Repository Contents
-
-**README.md** (this file)
-- Overview and business value
-- System architecture summary
-- Production metrics and results
-- Use cases and technical comparison
-
-**ARCHITECTURE.md**
-- 4-layer design detailed specification
-- Chunking strategy and rationale
-- Embedding model evaluation
-- ChromaDB configuration and optimization
-- Update mechanisms (full vs incremental)
-
-**IMPLEMENTATION.md**
-- Complete build journey (problem → solution → results)
-- Decision points and trade-offs
-- Debugging case study (ChromaDB batching bug)
-- Production deployment and monitoring
-- Lessons learned and future enhancements
-
----
-
-## Quick Stats
+## Results
 
 | Metric | Value |
 |--------|-------|
-| **Token Efficiency Gain** | 70-90% |
-| **Search Latency** | <500ms |
-| **Indexed Documents** | 124 files |
-| **Searchable Chunks** | 7,396 |
-| **Monthly Token Savings** | 1.14 million |
-| **API Costs** | $0 (local) |
-| **Session Completion Rate** | 98% |
-| **Setup Time** | <10 minutes |
+| Total embedded chunks | **17,428** (14,335 conversation + 3,093 document) |
+| Source material | **373 conversations, 1.2M words, 224MB** + **506 files** |
+| Retrieval speed | **Sub-second** |
+| Incremental update time | **<10 seconds** (vs. 5+ min full rebuild) |
+| Chunking strategy | **~500 tokens per chunk** with overlap |
+| Vector dimensions | **384** (all-MiniLM-L6-v2) |
+| Storage | **Supabase pgvector** (migrated from ChromaDB) |
+| Consuming services | **Semantic search webhook, story mining, session context retrieval** |
 
 ---
 
-**Author:** Jordan Minor  
-**Contact:** [GitHub Portfolio](https://mrminor-dev.github.io)  
-**Status:** Production system at MRMINOR LLC  
-**Last Updated:** November 2025
+## Applications
+
+This infrastructure enabled several downstream capabilities that wouldn't have been possible with file-level search:
+
+- **Story mining:** 50 semantic queries across the full conversation history extracted 485 evidence chunks for a professional portfolio — finding specific debugging stories, architectural decisions, and quantified outcomes buried across hundreds of sessions.
+- **Session continuity:** Agent retrieves relevant historical context without loading entire conversations. "Search before load" policy reduces token consumption dramatically.
+- **Audit and compliance:** Searchable history of every decision, rationale, and trade-off across 350+ sessions of autonomous operation.
+
+---
+
+## Built With
+
+- **Embeddings:** sentence-transformers/all-MiniLM-L6-v2 via HuggingFace API
+- **Vector storage:** Supabase PostgreSQL + pgvector (HNSW indexing)
+- **Retrieval:** n8n webhook workflows
+- **Indexing:** Python with hash-based change detection
+- **Previous:** ChromaDB (local, migrated away)
+- **Production scale:** 17,428 chunks, 506 files, 350+ sessions consuming
+
+---
+
+## License
+
+MIT
+
+## Author
+
+**Jordan Waxman** — [mrminor-dev.github.io](https://mrminor-dev.github.io)
+
+14 years operations leadership → building production AI infrastructure. This search framework was developed to solve a real operational problem: making 350+ sessions of AI-generated institutional knowledge retrievable in sub-second time, so the next session starts smarter than the last.
