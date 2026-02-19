@@ -137,7 +137,7 @@ Real problems encountered and solved during development:
 | Chunking strategy | **~500 tokens per chunk** with overlap |
 | Vector dimensions | **384** (all-MiniLM-L6-v2) |
 | Storage | **Supabase pgvector** (migrated from ChromaDB) |
-| Consuming services | **Semantic search webhook, story mining, session context retrieval** |
+| In production since | October 2024 |
 
 ---
 
@@ -170,4 +170,4 @@ MIT
 
 **Jordan Waxman** — [mrminor-dev.github.io](https://mrminor-dev.github.io)
 
-14 years operations leadership → building production AI infrastructure. This search framework was developed to solve a real operational problem: making 350+ sessions of AI-generated institutional knowledge retrievable in sub-second time, so the next session starts smarter than the last.
+14 years operations leadership — building production AI infrastructure since 2025. This search framework was developed to solve a real operational problem: making an AI-generated institutional knowledge base retrievable in sub-second time, so the next session starts smarter than the last.
