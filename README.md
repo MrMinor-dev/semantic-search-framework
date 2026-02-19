@@ -86,6 +86,18 @@ Key schema decisions:
 
 A cloud webhook receives search queries, embeds the query text using the same model, and runs a cosine similarity search against pgvector. Results return ranked by relevance with source metadata — allowing the consuming agent to cite where information came from.
 
+The core retrieval query:
+
+```sql
+SELECT content, metadata, 1 - (embedding <=> query_embedding) AS similarity
+FROM doc_embeddings
+WHERE 1 - (embedding <=> query_embedding) > 0.3
+ORDER BY similarity DESC
+LIMIT 10;
+```
+
+The `<=>` operator is pgvector's cosine distance. Subtracting from 1 converts distance to similarity (0 = unrelated, 1 = identical). The `0.3` threshold filters noise — results below that score are semantically unrelated to the query. The query runs in under a second on 17,428 vectors because pgvector uses an HNSW index: approximate nearest-neighbor search, not brute force.
+
 The "search before load" policy: always query the index first, then load full files only when the chunks confirm relevance. This pattern consistently saves 80%+ of the tokens that would be wasted on speculative document loading.
 
 ---
