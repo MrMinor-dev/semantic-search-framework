@@ -1,8 +1,10 @@
 # Semantic Search Framework
 
-**Production retrieval infrastructure: 17,428 embedded chunks with sub-second search and incremental indexing**
+**17,428 embedded chunks. Sub-second retrieval. Hash-based incremental updates in under 10 seconds.**
 
-A complete pipeline for parsing, chunking, embedding, and retrieving unstructured text at scale — built to make 350+ AI conversations and 500+ documents searchable in under a second. Migrated from local ChromaDB to cloud Supabase pgvector. Hash-based incremental updates run in <10 seconds vs. 5+ minutes for full rebuilds.
+Two weeks in, retrieval quality started degrading. Searches that should have returned strong matches came back weak. No errors. No alerts. The embedding endpoint was accepting requests and returning vectors — they just weren't accurate anymore. The HuggingFace API had migrated to a new URL format. The old endpoint still worked, just badly. Silent failure with no observable signal except gradually worse results.
+
+That failure shaped the architecture: retrieval infrastructure needs health signals, not just uptime monitoring.
 
 ---
 
@@ -112,9 +114,19 @@ The lesson: retrieval infrastructure only compounds when it's accessible from ev
 
 ---
 
+## Why It Matters
+
+Semantic search infrastructure is the same architecture pattern behind security log analysis, threat detection, and audit trail search — any domain where finding the right record fast matters. The specific components here — ingest → normalize → embed → index → retrieve — are the same steps whether you're processing AI conversations, customer support transcripts, engineering post-mortems, or security logs.
+
+The operational lesson: if you can't retrieve it, you can't act on it. An organization's AI-generated history is either searchable institutional knowledge or it's noise that disappears session by session. This framework is what makes it the former.
+
+---
+
 ## Debugging Journey
 
 Real problems encountered and solved during development:
+
+**Silent API migration.** HuggingFace migrated to a new URL format. The old endpoint (`api-inference.huggingface.co`) kept accepting requests and returning vectors — they just weren't semantically accurate anymore. No errors surfaced. The only signal was retrieval quality gradually declining on searches that should have returned strong matches. Lesson: the migrations that don't throw errors are the dangerous ones. Added health-check queries to the weekly ops checklist after this.
 
 **Python version incompatibility.** Python 3.14 was too new for sentence-transformers dependencies. Downgraded to 3.12. Lesson: bleeding-edge runtimes and ML libraries don't mix.
 
